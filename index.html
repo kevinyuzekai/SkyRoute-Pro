@@ -1,0 +1,642 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <meta name="description" content="天际航线 SkyRoute — 网页版民航客机飞行模拟器">
+  <title>SkyRoute Pro Beta</title>
+  <link rel="icon" href="assets/brand/favicon.ico" sizes="any">
+  <link rel="icon" type="image/png" sizes="32x32" href="assets/brand/favicon-32.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="assets/brand/skyroute_app_icon_192.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="assets/brand/skyroute_app_icon_180.png">
+  <script src="js/pro-edition.js"></script>
+  <script>
+    // PWA 清单只在 http(s) 下加载 (file:// 打开时浏览器会因跨域拒绝清单并报错)
+    if (/^https?:/.test(location.protocol)) document.write('<link rel="manifest" href="assets/brand/manifest.webmanifest">');
+  </script>
+  <meta name="theme-color" content="#0b2a5b">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+
+<body>
+
+  <!-- ================= 3D 视口 ================= -->
+  <canvas id="viewport"></canvas>
+  <canvas id="hud-canvas"></canvas>
+
+  <!-- ================= 载入画面 ================= -->
+  <div id="loading" class="hidden">
+    <div class="load-box">
+      <div class="load-logo"><span class="brand-logo-card"><img src="assets/brand/skyroute-pro-icon.svg" alt="SkyRoute Pro Beta" style="height:64px;width:64px;vertical-align:middle"><span class="pro-wordmark" style="font:700 26px/1 system-ui,sans-serif;color:#fff;margin-left:12px;vertical-align:middle">SkyRoute <b style="color:#f5b82e">Pro</b> <small style="font-size:13px;opacity:.75">Beta 0.1</small></span></span></div>
+      <div class="load-spinner"><i></i><i></i><i></i></div>
+      <div id="loading-msg">正在初始化…</div>
+    </div>
+  </div>
+
+  <!-- ================= 主菜单 ================= -->
+  <div id="main-menu" class="hidden">
+    <div class="menu-inner">
+      <header class="menu-head">
+        <div class="menu-brand">
+          <h1><span class="brand-logo-card"><img src="assets/brand/skyroute-pro-icon.svg" alt="SkyRoute Pro Beta" style="height:64px;width:64px;vertical-align:middle"><span class="pro-wordmark" style="font:700 26px/1 system-ui,sans-serif;color:#fff;margin-left:12px;vertical-align:middle">SkyRoute <b style="color:#f5b82e">Pro</b> <small style="font-size:13px;opacity:.75">Beta 0.1</small></span></span><span class="sr-only">天际航线 SkyRoute</span></h1>
+          <p>SKYROUTE · 民航客机飞行模拟</p>
+        </div>
+        <div class="menu-version" id="menu-version"></div>
+      </header>
+
+      <div class="menu-grid">
+
+        <!-- 机型选择 -->
+        <section class="panel panel-aircraft">
+          <h2>选择机型 <span>AIRCRAFT</span></h2>
+          <div id="aircraft-grid" class="aircraft-grid"></div>
+        </section>
+
+        <!-- 场景 -->
+        <section class="panel panel-scenario">
+          <h2>飞行场景 <span>SCENARIO</span></h2>
+          <div id="scenario-list" class="scenario-list"></div>
+          <p id="scenario-desc" class="scenario-desc"></p>
+        </section>
+
+        <!-- 设置 -->
+        <section class="panel panel-settings">
+          <h2>飞行设置 <span>SETTINGS</span></h2>
+
+          <div class="field">
+            <label for="lang-select">界面语言</label>
+            <select id="lang-select"></select>
+          </div>
+          <div class="field">
+            <label for="sound-volume">音效音量</label>
+            <div style="display:flex;gap:0.6rem;align-items:center">
+              <input id="sound-volume" type="range" min="0" max="100" step="5" value="80" style="flex:1">
+              <label style="display:flex;gap:0.3rem;align-items:center;white-space:nowrap"><input id="sound-mute" type="checkbox"> 静音</label>
+            </div>
+          </div>
+          <div class="field">
+            <button id="check-update-btn" type="button" class="btn btn-ghost">检查更新</button>
+          </div>
+          <div class="field">
+            <label for="dep-airport">出发机场</label>
+            <select id="dep-airport"></select>
+          </div>
+          <div class="field">
+            <label for="runway-select">跑道</label>
+            <select id="runway-select"></select>
+          </div>
+          <div class="field">
+            <label for="arr-airport">目的机场</label>
+            <select id="arr-airport"></select>
+          </div>
+          <div class="field-row">
+            <div class="field">
+              <label for="weather-select">天气</label>
+              <select id="weather-select"></select>
+            </div>
+            <div class="field">
+              <label for="livery-select">涂装</label>
+              <select id="livery-select"></select>
+              <div class="pro-livery-note" style="font-size:11px;opacity:.7;margin-top:3px">航司涂装为爱好者自制, 与各航空公司无关联、未获授权。</div>
+            </div>
+          </div>
+
+          <div class="field">
+            <label for="time-slider">当地时间 <b id="time-value">10:00</b></label>
+            <input type="range" id="time-slider" min="0" max="24" step="0.25" value="10">
+          </div>
+          <div class="field">
+            <label for="fuel-slider">燃油 <b id="fuel-value">30%</b></label>
+            <input type="range" id="fuel-slider" min="0.05" max="1" step="0.01" value="0.30">
+          </div>
+          <div class="field">
+            <label for="payload-slider">业载 <b id="payload-value">70%</b></label>
+            <input type="range" id="payload-slider" min="0" max="1" step="0.01" value="0.70">
+          </div>
+          <div class="field-row">
+            <div class="field">
+              <label for="online-scenery">联网地景</label>
+              <select id="online-scenery" title="在线加载真实地形高程与卫星影像 (需要联网; 离线时自动回退到内置地形)">
+                <option value="1">开 (真实地形 + 卫星影像)</option>
+                <option value="0">关 (内置程序化地形)</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="imagery-select">影像源</label>
+              <select id="imagery-select" title="影像许可见 致谢 / 许可">
+                <option value="s2-2016">Sentinel-2 2016 (CC BY)</option>
+                <option value="s2-2024">Sentinel-2 2024 (仅非商业)</option>
+                <option value="gibs">NASA Blue Marble (低清)</option>
+              </select>
+            </div>
+          </div>
+          <div class="field">
+            <label for="timescale-select">时间倍率</label>
+            <select id="timescale-select">
+              <option value="0.5">×0.5 慢动作</option>
+              <option value="1" selected>×1 正常</option>
+              <option value="2">×2</option>
+              <option value="4">×4</option>
+            </select>
+          </div>
+        </section>
+      </div>
+
+      <footer class="menu-foot">
+        <div id="menu-summary" class="menu-summary"></div>
+        <div class="menu-actions">
+          <button id="credits-btn" class="btn btn-ghost" title="3D 模型、地景数据来源与许可">致谢 / 许可</button>
+          <button id="joy-menu-btn" class="btn btn-ghost" title="摇杆 / 侧杆 / 油门台映射">摇杆设置</button>
+          <button id="quick-start" class="btn btn-ghost">快速开始（默认起飞）</button>
+          <button id="start-flight" class="btn btn-primary">开始飞行 →</button>
+        </div>
+      </footer>
+    </div>
+  </div>
+
+  <!-- ================= 飞行界面 ================= -->
+  <div id="ui" class="hidden">
+
+    <!-- 顶栏 -->
+    <div id="topbar">
+      <div class="tb-left">
+        <button id="menu-btn" class="tb-btn" title="菜单 / 暂停 (Esc)">☰</button>
+        <span id="flight-title" class="tb-title">—</span>
+      </div>
+      <div class="tb-center" id="fma-strip-wrap">
+        <span class="tb-lbl">FMA</span>
+        <div id="fma-strip" class="fma-strip"></div>
+      </div>
+      <div class="tb-right">
+        <span id="perf" class="tb-perf">—</span>
+        <span class="view-ctl" title="切换视角 (C 键循环, Shift+C 反向)">
+          <button id="view-btn" class="tb-btn tb-wide">🎥 <span id="view-name">驾驶舱</span></button><select id="view-select" class="tb-select" aria-label="选择视角"></select>
+        </span>
+        <button id="yoke-btn" class="tb-btn tb-wide" title="鼠标驾驶杆: 光标相对屏幕中心 = 杆量 (M)">🖱 鼠标杆</button>
+        <button id="joy-btn" class="tb-btn tb-wide" title="摇杆设置 (Gamepad API)">🕹 摇杆</button>
+        <button id="help-btn" class="tb-btn" title="操作说明 (F1 / ?)">?</button>
+        <button id="panelview-btn" class="tb-btn tb-wide" title="三维驾驶舱: 看向仪表板 / 恢复向外看 (N)">🔍 仪表板</button>
+        <button id="panel-toggle" class="tb-btn on" title="显示/隐藏侧边面板: 检查单 / 中央操纵台 (Shift+Tab)">▤</button>
+        <button id="ui-toggle" class="tb-btn" title="隐藏界面 (`)">◻</button>
+      </div>
+    </div>
+
+    <!-- FCU 自动驾驶控制面板 -->
+    <div id="fcu" class="panel-glass">
+      <div class="fcu-title">FCU · 飞行控制组件</div>
+      <div class="fcu-row">
+
+        <div class="fcu-unit">
+          <div class="fcu-label">速度 <span id="fcu-spd-mode">SPD</span></div>
+          <div class="fcu-win">
+            <button class="knob" id="fcu-spd-dec">−</button>
+            <div class="fcu-val" id="fcu-spd-val">250</div>
+            <button class="knob" id="fcu-spd-inc">+</button>
+          </div>
+          <div class="fcu-unit-tag" id="fcu-spd-unit">kt</div>
+          <div class="fcu-pushpull">
+            <button class="pp pp-push" id="fcu-spd-push">PUSH</button>
+            <button class="pp pp-pull" id="fcu-spd-pull">PULL</button>
+          </div>
+          <button class="mini" id="fcu-spd-mach">SPD/MACH</button>
+        </div>
+
+        <div class="fcu-unit">
+          <div class="fcu-label">航向</div>
+          <div class="fcu-win">
+            <button class="knob" id="fcu-hdg-dec">−</button>
+            <div class="fcu-val" id="fcu-hdg-val">000</div>
+            <button class="knob" id="fcu-hdg-inc">+</button>
+          </div>
+          <div class="fcu-unit-tag">°</div>
+          <div class="fcu-pushpull">
+            <button class="pp pp-push" id="fcu-hdg-push">PUSH<br><small>NAV</small></button>
+            <button class="pp pp-pull" id="fcu-hdg-pull">PULL<br><small>HDG</small></button>
+          </div>
+        </div>
+
+        <div class="fcu-unit">
+          <div class="fcu-label">高度</div>
+          <div class="fcu-win">
+            <button class="knob" id="fcu-alt-dec">−</button>
+            <div class="fcu-val" id="fcu-alt-val">100</div>
+            <button class="knob" id="fcu-alt-inc">+</button>
+          </div>
+          <div class="fcu-unit-tag">×100 ft</div>
+          <div class="fcu-pushpull">
+            <button class="pp pp-push" id="fcu-alt-push">PUSH<br><small>CLB</small></button>
+            <button class="pp pp-pull" id="fcu-alt-pull">PULL<br><small>SEL</small></button>
+          </div>
+        </div>
+
+        <div class="fcu-unit">
+          <div class="fcu-label">垂直速度</div>
+          <div class="fcu-win">
+            <button class="knob" id="fcu-vs-dec">−</button>
+            <div class="fcu-val" id="fcu-vs-val">+0000</div>
+            <button class="knob" id="fcu-vs-inc">+</button>
+          </div>
+          <div class="fcu-unit-tag">fpm</div>
+          <div class="fcu-pushpull">
+            <button class="pp pp-push" id="fcu-vs-push">PUSH<br><small>ALT</small></button>
+            <button class="pp pp-pull" id="fcu-vs-pull">PULL<br><small>V/S</small></button>
+          </div>
+        </div>
+
+        <div class="fcu-modes">
+          <button id="fcu-ap1" class="mode-btn">AP1</button>
+          <button id="fcu-ap2" class="mode-btn">AP2</button>
+          <button id="fcu-athr" class="mode-btn">A/THR</button>
+          <button id="fcu-loc" class="mode-btn">LOC</button>
+          <button id="fcu-appr" class="mode-btn">APPR</button>
+          <button id="fcu-exped" class="mode-btn">EXPED</button>
+          <button id="fcu-level" class="mode-btn">LEVEL</button>
+          <button id="fcu-toga" class="mode-btn mode-warn">TOGA</button>
+          <button id="fcu-apdisconnect" class="mode-btn mode-red">AP OFF</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 左侧栏: 目标 + 检查单 -->
+    <div id="left-col">
+      <div class="panel-glass" id="objectives-panel">
+        <div id="objectives"></div>
+      </div>
+      <div class="panel-glass" id="checklist-panel">
+        <div class="cl-title-row">
+          <span id="checklist-title">检查单</span>
+          <span class="cl-hint">CHECKLIST</span>
+        </div>
+        <div id="checklist-body"></div>
+      </div>
+    </div>
+
+    <!-- 右侧栏: 中央操纵台 -->
+    <div id="right-col">
+      <div class="panel-glass" id="pedestal">
+        <div class="ped-title">中央操纵台 · PEDESTAL</div>
+
+        <div class="ped-section">
+          <div class="ped-label">油门 <span>THRUST</span></div>
+          <div class="ped-throttle">
+            <div id="throttle-track" class="throttle-track"></div>
+            <div class="throttle-presets">
+              <button id="thr-idle" class="mini">慢车</button>
+              <button id="thr-climb" class="mini">爬升</button>
+              <button id="thr-flex" class="mini">灵活</button>
+              <button id="thr-toga" class="mini">TOGA</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="ped-section">
+          <div class="ped-label">襟翼 <span>FLAPS</span></div>
+          <div id="flap-detents" class="flap-detents"></div>
+        </div>
+
+        <div class="ped-section">
+          <div class="ped-label">起落架 <span>GEAR</span></div>
+          <div class="ped-row">
+            <button id="gear-up" class="ped-btn">收上 UP</button>
+            <button id="gear-down" class="ped-btn">放下 DN</button>
+            <div id="gear-indicator" class="gear-indicator down">DOWN</div>
+          </div>
+        </div>
+
+        <div class="ped-section">
+          <div class="ped-label">自动刹车 <span>AUTO BRAKE</span></div>
+          <div id="autobrake-list" class="autobrake-list"></div>
+        </div>
+
+        <div class="ped-section">
+          <div class="ped-label">其他 <span>MISC</span></div>
+          <div class="ped-row">
+            <button id="battery-btn" class="ped-btn">电源</button>
+            <button id="park-brake" class="ped-btn">停留刹车</button>
+            <button id="pushback-btn" class="ped-btn">推出</button>
+            <button id="spoiler-arm" class="ped-btn">扰流板预位</button>
+            <button id="speedbrake-toggle" class="ped-btn">减速板</button>
+          </div>
+        </div>
+
+        <div class="ped-section">
+          <div class="ped-label">发动机 <span>ENGINE</span></div>
+          <div class="ped-row">
+            <button id="eng-start-1" class="ped-btn">发 1 起动</button>
+            <button id="eng-start-2" class="ped-btn">发 2 起动</button>
+            <button id="apu-btn" class="ped-btn">APU</button>
+            <button id="eng-start-all" class="ped-btn">全部起动</button>
+          </div>
+          <div class="ped-row">
+            <button id="reverser-1" class="ped-btn">反推 1</button>
+            <button id="reverser-2" class="ped-btn">反推 2</button>
+          </div>
+        </div>
+
+        <div class="ped-section">
+          <div class="ped-label">灯光 <span>LIGHTS</span></div>
+          <div id="lights-panel" class="lights-panel"></div>
+        </div>
+
+        <div class="ped-section">
+          <div class="ped-label">燃油 <span>FUEL</span></div>
+          <div class="fuel-bar"><i id="fuel-bar-fill"></i></div>
+          <div id="fuel-text" class="fuel-text">—</div>
+        </div>
+
+        <div class="ped-section">
+          <div class="ped-label">气压基准 <span>BARO</span></div>
+          <div class="ped-row">
+            <button id="baro-dec" class="mini">−</button>
+            <button id="baro-std" class="mini on">STD</button>
+            <button id="baro-inc" class="mini">+</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 仪表 -->
+    <div id="displays" class="hidden" aria-hidden="true">
+      <div class="disp-col">
+        <div class="disp-label">PFD · 机长</div>
+        <canvas id="pfd-left"></canvas>
+        <div class="disp-label">ND · 机长</div>
+        <canvas id="nd-left"></canvas>
+      </div>
+
+      <div class="disp-col disp-center">
+        <div class="disp-label">ECAM 上 · 发动机/告警</div>
+        <canvas id="ecam-upper"></canvas>
+        <div class="disp-label">ECAM 下 · 系统</div>
+        <canvas id="ecam-lower"></canvas>
+      </div>
+
+      <div class="disp-col">
+        <div class="disp-label">ND · 副驾</div>
+        <canvas id="nd-right"></canvas>
+        <div class="disp-label">PFD · 副驾</div>
+        <canvas id="pfd-right"></canvas>
+      </div>
+
+      <div class="disp-tools">
+        <button id="nd-range-up" class="tb-btn" title="ND 量程 +">＋</button>
+        <button id="nd-range-down" class="tb-btn" title="ND 量程 −">－</button>
+        <button id="nd-mode" class="tb-btn" title="ROSE / ARC">模式</button>
+        <button id="nd-terrain" class="tb-btn" title="地形显示">地形</button>
+        <button id="nd-weather" class="tb-btn on" title="气象雷达">气象</button>
+      </div>
+    </div>
+
+    <!-- 底部状态栏 -->
+    <div id="statusbar">
+      <div class="sb"><span class="sb-k">空速</span><span class="sb-v" id="sb-ias">—</span></div>
+      <div class="sb"><span class="sb-k">马赫</span><span class="sb-v" id="sb-mach">—</span></div>
+      <div class="sb"><span class="sb-k">高度</span><span class="sb-v" id="sb-alt">—</span></div>
+      <div class="sb"><span class="sb-k">离地</span><span class="sb-v sb-dim" id="sb-agl">—</span></div>
+      <div class="sb"><span class="sb-k">升降</span><span class="sb-v" id="sb-vs">—</span></div>
+      <div class="sb"><span class="sb-k">航向</span><span class="sb-v" id="sb-hdg">—</span></div>
+      <div class="sb"><span class="sb-k">航迹</span><span class="sb-v sb-dim" id="sb-trk">—</span></div>
+      <div class="sb"><span class="sb-k">地速</span><span class="sb-v sb-dim" id="sb-gs">—</span></div>
+      <div class="sb"><span class="sb-k">风</span><span class="sb-v" id="sb-wind">—</span></div>
+      <div class="sb"><span class="sb-k">N1</span><span class="sb-v" id="sb-n1">—</span></div>
+      <div class="sb"><span class="sb-k">燃油</span><span class="sb-v" id="sb-fuel">—</span></div>
+      <div class="sb"><span class="sb-k">全重</span><span class="sb-v sb-dim" id="sb-gw">—</span></div>
+      <div class="sb"><span class="sb-k">飞行时间</span><span class="sb-v" id="sb-time">00:00:00</span></div>
+      <div class="sb-warn">
+        <div id="master-caution" class="warn-lamp caution">主警戒</div>
+        <div id="master-warning" class="warn-lamp warning">主警告</div>
+      </div>
+    </div>
+
+    <!-- 通知 -->
+    <div id="notifications"></div>
+  </div>
+
+  <!-- ================= 暂停菜单 ================= -->
+  <div id="pause-menu" class="overlay hidden">
+    <div class="overlay-box">
+      <h2>已暂停</h2>
+      <p class="ov-sub">PAUSED</p>
+      <div class="ov-actions">
+        <button id="resume-flight" class="btn btn-primary">继续飞行</button>
+        <button id="back-to-menu" class="btn btn-ghost">返回主菜单</button>
+        <button id="pause-to-menu" class="btn btn-ghost">重新选择场景</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= 致谢 / 资源许可 (beta 0.2) ================= -->
+  <div id="credits-overlay" class="overlay hidden">
+    <div class="overlay-box overlay-box-wide">
+      <h2>关于 / 致谢 / 资源许可</h2>
+      <p class="ov-sub">CREDITS &amp; ASSET LICENSES</p>
+      <div id="credits-list" class="credits-list"></div>
+      <div class="pro-gpl" style="margin-top:10px;padding:8px 10px;border:1px solid #f5b82e55;border-radius:8px;font-size:12px;line-height:1.5">
+        <b>SkyRoute Pro Beta 0.1 · 自由软件 (GPL-2.0-or-later)</b><br>
+        本程序以 GNU 通用公共许可证第 2 版或 (可选) 更高版本发布, 见安装目录 <code>LICENSE-GPL.txt</code>。
+        A320 系列 / 737 / 777 / 787 驾驶舱三维模型改编自 FlightGear FGAddon 中以 GPL 发布的机模 (作者与修改说明见 <code>CREDITS-FlightGear.md</code> 与 <code>licenses/fg/</code>)。
+        完整对应源代码随发布包提供 (<code>SkyRoutePro-0.1.0-source.zip</code>), 书面源码提供承诺见 <code>SOURCE-OFFER.md</code>。
+        航司涂装为爱好者自制的配色还原, 与相关航空公司无任何关联、未获授权或认可。外部机模为 CGTrader 免费模型 (Royalty Free), 不属于 GPL 部分。
+      </div>
+      <div class="ov-actions">
+        <button id="credits-close" class="btn btn-primary">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= 操作说明 ================= -->
+  <div id="help-overlay" class="overlay hidden">
+    <div class="overlay-box overlay-box-wide">
+      <h2>操作说明</h2>
+      <p class="ov-sub">CONTROLS &amp; KEY BINDINGS</p>
+
+      <div class="help-grid">
+        <div class="help-col">
+          <h3>飞行操纵（默认键位）</h3>
+          <table class="help-table">
+            <tr><td><kbd>↑</kbd> / <kbd>↓</kbd></td><td>推杆低头 / 拉杆抬头（也可 <kbd>W</kbd>/<kbd>S</kbd>）</td></tr>
+            <tr><td><kbd>←</kbd> / <kbd>→</kbd></td><td>左 / 右横滚（也可 <kbd>A</kbd>/<kbd>D</kbd>）</td></tr>
+            <tr><td><kbd>,</kbd> / <kbd>.</kbd></td><td>方向舵 / 前轮转向（小键盘 <kbd>0</kbd>/<kbd>Enter</kbd>，或 <kbd>Q</kbd>/<kbd>E</kbd>）</td></tr>
+            <tr><td><kbd>M</kbd></td><td>鼠标驾驶杆 开/关（光标相对屏幕中心 = 杆量）</td></tr>
+            <tr><td><kbd>PgUp</kbd>/<kbd>PgDn</kbd> 或 <kbd>+</kbd>/<kbd>-</kbd></td><td>油门 加 / 减</td></tr>
+            <tr><td><kbd>8</kbd> / <kbd>9</kbd> / <kbd>0</kbd></td><td>TOGA / 爬升推力 / 慢车</td></tr>
+            <tr><td><kbd>Home</kbd> / <kbd>End</kbd></td><td>升降舵配平 低头 / 抬头</td></tr>
+            <tr><td><kbd>B</kbd>（按住）</td><td>机轮刹车</td></tr>
+            <tr><td><kbd>Shift</kbd>+<kbd>B</kbd></td><td>停留刹车</td></tr>
+            <tr><td><kbd>空格</kbd> / <kbd>P</kbd></td><td>暂停 / 继续</td></tr>
+          </table>
+
+          <h3>飞机系统</h3>
+          <table class="help-table">
+            <tr><td><kbd>G</kbd></td><td>起落架 收/放</td></tr>
+            <tr><td><kbd>F</kbd> / <kbd>Shift</kbd>+<kbd>F</kbd></td><td>襟翼 收一档 / 放一档（<kbd>V</kbd> 也可放）</td></tr>
+            <tr><td><kbd>X</kbd></td><td>减速板</td></tr>
+            <tr><td><kbd>R</kbd></td><td>反推预位</td></tr>
+            <tr><td><kbd>Shift</kbd>+<kbd>E</kbd></td><td>电池 / 电源主开关（冷舱启动时先接通，座舱点亮）</td></tr>
+            <tr><td><kbd>Shift</kbd>+<kbd>A</kbd></td><td>APU 起动（配合 <kbd>Ctrl</kbd>+<kbd>S</kbd> 起动发动机）</td></tr>
+            <tr><td><kbd>Shift</kbd>+<kbd>P</kbd></td><td>地面推出（牵引车，再按一次停止）</td></tr>
+          </table>
+        </div>
+
+        <div class="help-col">
+          <h3>自动驾驶</h3>
+          <table class="help-table">
+            <tr><td><kbd>T</kbd></td><td>自动驾驶 接通 / 断开（断开后再按一次消除警告音；A/THR 保持）</td></tr>
+            <tr><td><kbd>Y</kbd></td><td>自动油门</td></tr>
+            <tr><td><kbd>H</kbd> / <kbd>J</kbd></td><td>航向 HDG / 水平导航 LNAV</td></tr>
+            <tr><td><kbd>L</kbd> / <kbd>K</kbd> / <kbd>U</kbd></td><td>高度 ALT / 垂直速度 V/S / FLCH</td></tr>
+            <tr><td><kbd>I</kbd> / <kbd>O</kbd></td><td>APPR 进近预位 / SPD-MACH 切换</td></tr>
+            <tr><td><kbd>[</kbd> <kbd>]</kbd></td><td>目标高度 ∓</td></tr>
+            <tr><td><kbd>;</kbd> <kbd>'</kbd></td><td>航向 ∓</td></tr>
+            <tr><td><kbd>{</kbd> <kbd>}</kbd>（Shift+[ ]）</td><td>速度 ∓</td></tr>
+          </table>
+
+          <h3>视角与界面</h3>
+          <table class="help-table">
+            <tr><td><kbd>C</kbd> / <kbd>Shift</kbd>+<kbd>C</kbd></td><td>循环切换视角（驾驶舱 / 追踪 / 自由 …），也可点顶栏 🎥 视角按钮</td></tr>
+            <tr><td><kbd>1</kbd>…<kbd>7</kbd></td><td>驾驶舱 / 机翼 / 追踪 / 塔台 / 环绕 / 自由 / 飞掠</td></tr>
+            <tr><td>在画面上拖拽鼠标</td><td>环视（鼠标驾驶杆开启时用右键拖拽）；外部视角滚轮缩放</td></tr>
+            <tr><td>触摸</td><td>单指拖动 = 驾驶杆，第二根手指拖动 = 环视</td></tr>
+            <tr><td>驾驶舱视角</td><td>默认三维驾驶舱（机长座位）；拖拽鼠标 / 摇杆苦力帽环视，<kbd>小键盘 5</kbd> 视线回正</td></tr>
+            <tr><td><kbd>N</kbd></td><td>看向仪表板（低头 + 放大，仪表清晰可读）/ 恢复向外看，也可点顶栏 🔍 仪表板</td></tr>
+            <tr><td>三维驾驶舱开关</td><td>左键 = 正向 / 接通 / 放出；右键或 Shift+左键 = 反向 / 断开 / 收起；旋钮、油门、襟翼、减速板可用滚轮或拖动</td></tr>
+            <tr><td>点击 FCU / MCP</td><td>遮光板按钮可点；旋钮左 / 右半边 = 减 / 加（可按住或滚轮），上半 = PUSH，下半 = PULL；点击起落架手柄收放</td></tr>
+            <tr><td><kbd>Tab</kbd> / <kbd>Shift</kbd>+<kbd>Tab</kbd></td><td>显示 / 隐藏侧边面板（检查单、操纵台）</td></tr>
+            <tr><td><kbd>`</kbd></td><td>显示 / 隐藏整个界面</td></tr>
+            <tr><td><kbd>?</kbd> 或 <kbd>F1</kbd></td><td>本说明</td></tr>
+            <tr><td><kbd>Esc</kbd></td><td>暂停菜单</td></tr>
+            <tr><td><kbd>Shift</kbd>+<kbd>M</kbd> / <kbd>Shift</kbd>+<kbd>H</kbd> / <kbd>Shift</kbd>+<kbd>T</kbd></td><td>静音 / HUD / 时间倍率</td></tr>
+            <tr><td><kbd>F2</kbd></td><td>截图</td></tr>
+          </table>
+
+          <h3>手柄 / 摇杆</h3>
+          <table class="help-table">
+            <tr><td>Xbox/PS 手柄</td><td>左摇杆 = 杆，LB/RB = 方向舵，LT/RT = 油门，A 起落架，X 刹车，Y 视角，十字键 襟翼</td></tr>
+            <tr><td>飞行摇杆 / TCA</td><td>顶栏 🕹 摇杆 或 菜单"摇杆设置"中映射轴与按钮（AP 断开 / PTT / 刹车）；Chrome/Edge 需先按一下摇杆按钮</td></tr>
+            <tr><td>脚舵 (方向舵踏板)</td><td>自动识别为脚舵：踏板 = 方向舵，左/右趾刹 = 刹车，不会占用俯仰/横滚；与摇杆同时连接时方向舵以脚舵为准</td></tr>
+          </table>
+        </div>
+
+        <div class="help-col">
+          <h3>飞行小贴士</h3>
+          <ul class="help-tips">
+            <li><b>起飞：</b>襟翼放至起飞位（F/V 键或点击操纵台），推油门至 TOGA，达到 VR 后轻拉杆，
+              正上升率后收起落架，按速度收襟翼。</li>
+            <li><b>爬升：</b>保持目标速度约 250 kt 至 10000 ft，之后加速到 300 kt / M0.78。</li>
+            <li><b>巡航：</b>接通 AP 与 A/THR，使用 ALT 保持高度、MACH 保持马赫数。</li>
+            <li><b>下降：</b>下降率不超过 2000 fpm，提前 3 nm/1000 ft 开始下高。</li>
+            <li><b>进近：</b>设定 ILS 频率，APPR 预位，截获 LOC 与 G/S 后放起落架与着陆襟翼，
+              自动刹车选择 LO 或 2。</li>
+            <li><b>着陆：</b>50 ft 开始收油门，20 ft 柔和拉平，接地后拉反推并使用方向舵保持中心线。</li>
+          </ul>
+          <h3>冷舱启动检查单 <small>COLD &amp; DARK</small></h3>
+          <p class="help-note">主菜单「飞行场景」选「冷舱启动」；其他场景开局时所有开关已在运行位置。全部步骤都可用鼠标点击三维驾驶舱完成（左键正向 / 右键反向 / 滚轮），ECAM 下方青色 ▶ 行提示下一步。</p>
+          <ol class="help-tips">
+            <li><b>电源：</b>头顶板 ELEC — BAT 1 + BAT 2 ON（OFF 灯熄灭），EXT PWR ON（AVAIL → ON），显示器通电。</li>
+            <li><b>ADIRS：</b>IR 1/2/3 旋到 NAV（对准约 75 秒，PFD/ND 显示 ALIGN，对准完成后才有姿态、地图与自动驾驶）。</li>
+            <li><b>燃油 / 灯光：</b>FUEL 6 个泵 ON；EXT LT 打开 BEACON 与 NAV；SIGNS 安全带 ON。</li>
+            <li><b>APU：</b>MASTER SW → START，约 30 秒后 AVAIL；AIR COND 面板 APU BLEED ON（X BLEED 保持 AUTO）。</li>
+            <li><b>起动：</b>操纵台 ENG MODE 旋到 IGN START → ENG MASTER 2 ON，等慢车后 ENG MASTER 1 ON（每台约 40 秒）。</li>
+            <li><b>起动后：</b>ENG MODE 回 NORM，APU BLEED OFF，PACK 1/2 ON，襟翼起飞位，松开停留刹车滑行。</li>
+            <li><b>波音布局</b>（737 / 737 MAX / 777 / 787 / E190）：BATTERY + STBY PWR，GRD PWR，IRS L/R → NAV，燃油泵，APU + START，APU BLEED，ENGINE START 旋到 GRD，FUEL CONTROL → RUN（起动完成后 START 自动回 OFF）。</li>
+          </ol>
+          <p class="help-note">EN: BAT 1+2 ON → EXT PWR ON → IR 1-3 NAV → FUEL PUMPS ON → BEACON ON → APU MASTER, START → APU BLEED ON → ENG MODE IGN/START → ENG MASTER 2, then 1 → MODE NORM, APU BLEED OFF.</p>
+          <p class="help-note">
+            本模拟器使用真实的六自由度飞行动力学模型：升力/阻力随迎角与马赫数变化、失速与过失速特性、
+            地面效应、跨音速阻力发散、起落架弹簧阻尼与轮胎侧偏、发动机转子滞后与高空推力衰减、
+            燃油消耗引起重量与重心变化。各机型的展弦比、后掠角、发动机推力均按公开数据建模。
+          </p>
+        </div>
+      </div>
+
+      <div class="ov-actions">
+        <button id="close-help" class="btn btn-primary">明白了</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- beta 0.3: 暂停提示 / 鼠标驾驶杆准星 / 摇杆设置 -->
+  <div id="pause-indicator" class="hidden">已暂停 — 按 空格 或 P 继续</div>
+  <div id="yoke-reticle" class="hidden"><div id="yoke-dot"></div></div>
+  <div id="ptt-indicator" class="hidden">📻 PTT</div>
+
+  <div id="joystick-overlay" class="overlay hidden">
+    <div class="overlay-box overlay-box-wide">
+      <h2>摇杆设置</h2>
+      <p class="ov-sub">JOYSTICK / SIDESTICK / THROTTLE QUADRANT (Gamepad API)</p>
+      <p class="joy-note">支持 Thrustmaster TCA 空客侧杆、TCA 油门台 (Quadrant)、方向舵脚舵及其他 HID 飞行摇杆。
+        每台设备只使用与其类型相符的轴 (或你手动绑定的轴); 多台设备同时连接时, 俯仰/横滚以侧杆为准, 方向舵以脚舵为准。
+        <b>Chrome / Edge 需要先按一下摇杆上的任意按钮 (或动一下轴), 浏览器才会把设备报告给网页。</b>
+        设置自动保存在本机浏览器 (localStorage)。</p>
+      <div id="joy-devices" class="joy-devices"></div>
+      <div class="ov-actions">
+        <button id="joy-reset" class="btn btn-ghost">恢复默认</button>
+        <button id="joy-close" class="btn btn-primary">完成</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 启动日志 (调试/自动化测试用) -->
+  <pre id="boot-log" aria-hidden="true"></pre>
+
+  <!-- ================= 脚本 ================= -->
+  <script src="vendor/three.min.js"></script>
+  <script src="js/utils.js"></script>
+  <script src="js/config.js"></script>
+  <script src="js/pro-liveries.js"></script>
+  <script src="js/airports.js"></script>
+  <script src="js/systems.js"></script>
+  <script src="js/flightmodel.js"></script>
+  <script src="js/autopilot.js"></script>
+  <script src="js/avionics.js"></script>
+  <!-- beta 0.2: 真实外形飞机模型 (CC BY 4.0, 见 ASSETS_LICENSES.md); 以 JS 内嵌, file:// 可直接加载 -->
+  <script src="models/tex_cockpit_airbus.js"></script>
+  <script src="models/tex_a350.js"></script>
+  <script src="models/tex_b787.js"></script>
+  <script src="models/tex_a330.js"></script>
+  <script src="models/tex_a321neo.js"></script>
+  <script src="models/tex_b738g.js"></script>
+  <script src="models/tex_b777g.js"></script>
+  <script src="models/ac_a350_900.js"></script>
+  <script src="models/ac_a350_1000.js"></script>
+  <script src="models/ac_a320neo.js"></script>
+  <script src="models/ac_a320ceo.js"></script>
+  <script src="models/ac_a321neo.js"></script>
+  <script src="models/ac_b737_800.js"></script>
+  <script src="models/ac_b787_9.js"></script>
+  <script src="models/ac_a330_300.js"></script>
+  <script src="models/ac_b737_max8.js"></script>
+  <script src="models/ac_b777_300er.js"></script>
+  <script src="models/ac_c919.js"></script>
+  <script src="models/ac_e190.js"></script>
+  <script src="js/aircraft3d.js"></script>
+  <script src="js/environment.js"></script>
+  <script src="js/runways.js"></script>
+  <script src="js/airport-osm-data.js"></script>
+  <script src="js/airport3d.js"></script>
+  <script src="js/scenery-online.js"></script>
+  <script src="js/device-library.js"></script>
+  <script src="js/joystick.js"></script>
+  <script src="js/audio.js"></script>
+  <script src="js/alerts.js"></script>
+  <script src="js/scenarios.js"></script>
+  <script src="js/overhead-layouts.js"></script>
+  <script src="js/pedestal-layouts.js"></script>
+  <script src="js/mcdu.js"></script>
+  <script src="js/cockpit3d.js"></script>
+  <script src="vendor/meshopt_decoder.js"></script>
+  <script src="js/fg-cockpit.js"></script>
+  <script src="js/pro-features.js"></script>
+  <script src="js/cabin3d.js"></script>
+  <script src="js/camera.js"></script>
+  <script src="js/input.js"></script>
+  <script src="js/hud.js"></script>
+  <script src="js/i18n-runtime.js"></script>
+  <script src="js/i18n.js"></script>
+  <script src="js/update-check.js"></script>
+  <script src="js/main.js"></script>
+  <script src="js/credits.js"></script>
+</body>
+
+</html>

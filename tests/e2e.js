@@ -1,0 +1,580 @@
+#!/usr/bin/env node
+/* ==========================================================================
+   天际航线 SkyRoute —— 无头 Chrome 端到端测试 (beta 0.2)
+   用法:
+     npm i puppeteer-core            (只需一次; 本游戏本身不依赖任何 npm 包)
+     CHROME=/path/to/chrome node tests/e2e.js [baseUrl]
+   baseUrl 默认为 file:// 方式直接打开本目录下的 index.html
+   (也可传 http://127.0.0.1:8000/index.html 之类的地址)
+   检查内容:
+     · 10 个飞行场景均可通过 URL 参数自动开始, 无页面错误 / 无 HTTP 错误
+     · 11 种机型均可构建 3D 模型; 真实模型的贴图就绪; 机轮接地 (不悬空/不下陷)
+     · 主菜单与「致谢 / 许可」面板可打开
+   beta 0.3 新增:
+     · 场景/机型测试固定使用内置地形 (online=0), 结果可复现
+     · A321neo 起飞 (静止时机身水平, 不坐尾; 能正常抬轮离地)
+     · 联网地景回退: 拦截全部瓦片请求 -> 自动回退到内置地形, 无页面错误
+     · online=0 时不发出任何瓦片请求
+     · 真实瓦片联网测试 (设置环境变量 ONLINE=0 可跳过)
+     · 视角按钮 / C 键切换视角, ? 键打开帮助
+   beta 0.3.1 新增:
+     · 默认三维驾驶舱 (外部模型隐藏, 仪表贴图刷新), N 看仪表板; 已取消简化仪表 / 2D 六屏
+     · 鼠标点击三维 FCU 上的 AP1 接通自动驾驶; 油门杆 / 侧杆 / 驾驶盘随输入移动
+     · 737 持续满拉杆: 抖杆触发, 迎角不超过失速迎角
+   beta 0.4.2 新增:
+     · 三维可操作开关: 灯光 / APU / 发动机主电门 / 停留刹车 / 自动刹车 / 襟翼双向 /
+       减速板分档与预位 / 推力手柄拖动; FCU 旋钮修复; EFIS FD 可点; 红色 AP 断开按钮
+   ========================================================================== */
+'use strict';
+var path = require('path');
+var puppeteer;
+try { puppeteer = require('puppeteer-core'); } catch (e) {
+  console.error('需要 puppeteer-core:  npm i puppeteer-core'); process.exit(2);
+}
+var CHROME = process.env.CHROME || '/usr/bin/google-chrome';
+var BASE = process.argv[2] || ('file://' + path.resolve(__dirname, '..', 'index.html'));
+var sleep = function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
+
+var SCENARIOS = ['cold-dark', 'takeoff', 'cruise', 'ils-approach', 'crosswind', 'pattern', 'engine-failure', 'night', 'storm-takeoff', 'free-flight'];
+var TYPES = ['A350-900', 'A350-1000', 'A320neo', 'A320ceo', 'A321neo', 'A330-300', 'B737-800', 'B737-MAX8', 'B777-300ER', 'B787-9', 'C919', 'E190'];
+
+(async function () {
+  var browser = await puppeteer.launch({ executablePath: CHROME, headless: 'new',
+    args: ['--no-sandbox', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist', '--allow-file-access-from-files'] });
+  var results = [];
+  var TILE_RE = /elevation-tiles-prod|tiles\.maps\.eox\.at|gibs\.earthdata\.nasa\.gov/;
+  async function job(name, query, check, setup) {
+    var page = await browser.newPage(); await page.setViewport({ width: 1280, height: 720 });
+    var errs = [];
+    page.__tileStats = { req: 0, failed: 0, http4xx: 0 };
+    if (setup) await setup(page);
+    page.on('pageerror', function (e) { errs.push('pageerror: ' + e.message); });
+    page.on('console', function (m) {
+      if (m.type() !== 'error') return;
+      // 浏览器自身记录的瓦片网络失败 (非脚本错误) 不计入
+      var loc = (m.location && m.location()) || {};
+      if (/Failed to load resource/.test(m.text()) && (TILE_RE.test(loc.url || '') || page.__blockTiles)) return;
+      errs.push('console.error: ' + m.text());
+    });
+    // 瓦片请求单独统计: 被取消 (不再需要的瓦片) 或海外无数据属正常现象, 不算页面错误
+    page.on('request', function (r) { if (TILE_RE.test(r.url())) page.__tileStats.req++; });
+    page.on('response', function (r) {
+      if (TILE_RE.test(r.url())) { if (r.status() >= 400) page.__tileStats.http4xx++; return; }
+      if (r.status() >= 400) errs.push('HTTP ' + r.status() + ' ' + r.url());
+    });
+    page.on('requestfailed', function (r) {
+      if (TILE_RE.test(r.url())) { page.__tileStats.failed++; return; }
+      errs.push('requestfailed: ' + r.url());
+    });
+    await page.evaluateOnNewDocument(function () { window.__FS_TEST__ = true; });
+    var t0 = Date.now(), msg = '', ok = true;
+    try {
+      await page.goto(BASE + (query ? '?' + query : ''), { waitUntil: 'load', timeout: 60000 });
+      msg = await check(page);
+      var fsErr = await page.evaluate(function () { return (window.__FS_ERRORS__ || []).slice(0, 5); });
+      if (fsErr.length) errs = errs.concat(fsErr.map(String));
+      if (errs.length) { ok = false; msg += ' | ' + errs.join(' ; '); }
+    } catch (e) { ok = false; msg = e.message + (errs.length ? ' | ' + errs.join(' ; ') : ''); }
+    await page.close();
+    results.push({ name: name, ok: ok, msg: msg });
+    console.log((ok ? '  ✔ ' : '  ✘ ') + name + '  — ' + msg + '  (' + ((Date.now() - t0) / 1000).toFixed(1) + ' s)');
+  }
+  async function started(page) {
+    await page.waitForFunction('window.FS && FS.sim && FS.sim.running && FS.sim.fm && FS.sim.aircraftModel', { timeout: 90000 });
+    await sleep(3000);
+  }
+
+  var ONLY = process.env.ONLY || '12345';
+  var coldJobs = [];   // 例: ONLY=4 只运行 beta 0.3 部分
+  console.log('\n无头 Chrome E2E —— ' + BASE + '\n\n[1] 主菜单 / 致谢面板');
+  if (ONLY.indexOf('1') >= 0) await job('主菜单 + 致谢面板', '', async function (page) {
+    await page.waitForSelector('#main-menu:not(.hidden)', { timeout: 60000 });
+    var n = await page.$$eval('.ac-card', function (c) { return c.length; });
+    var nExp = await page.evaluate(function () { return (FS.AircraftList || []).length; });   // 0.6.0: 按机型库实际数量 (0.5.3 起含 A320ceo = 12)
+    if (n !== nExp || n < 12) throw new Error('机型卡片数 ' + n + ' / 预期 ' + nExp);
+    await page.click('#credits-btn'); await sleep(300);
+    var txt = await page.$eval('#credits-list', function (e) { return e.textContent; });
+    if (!/CC BY 4\.0/.test(txt) || !/amvlab/.test(txt)) throw new Error('致谢面板内容缺失');
+    var real = await page.$$eval('.ac-model-real', function (c) { return c.length; });
+    return n + ' 张机型卡片, ' + real + ' 个标注真实模型, 致谢面板正常';
+  });
+
+  console.log('\n[2] 10 个场景初始化');
+  for (var i = 0; ONLY.indexOf('2') >= 0 && i < SCENARIOS.length; i++) {
+    await job('场景 ' + SCENARIOS[i], 'aircraft=A350-900&scenario=' + SCENARIOS[i] + '&autostart=1&online=0', async function (page) {
+      await started(page);
+      return await page.evaluate(function () {
+        var st = FS.sim.fm.getState();
+        ['altFt', 'iasKt', 'pitchDeg', 'rollDeg'].forEach(function (k) { if (!isFinite(st[k])) throw new Error('NaN ' + k); });
+        return 'alt ' + st.altFt.toFixed(0) + ' ft, IAS ' + st.iasKt.toFixed(0) + ' kt, ' + (st.onGround ? '地面' : '空中');
+      });
+    });
+  }
+
+  console.log('\n[3] 11 种机型模型 (起飞场景, ZGGG)');
+  for (var j = 0; ONLY.indexOf('3') >= 0 && j < TYPES.length; j++) {
+    await job('机型 ' + TYPES[j], 'aircraft=' + TYPES[j] + '&scenario=takeoff&dep=ZGGG&autostart=1&online=0', async function (page) {
+      await started(page);
+      // beta 0.3.1: 默认三维驾驶舱会隐藏外部模型, 先切到外部视角再检查模型
+      await page.evaluate(function () { FS.sim.cameraRig.setMode('chase'); }); await sleep(1500);
+      return await page.evaluate(function () {
+        var sim = FS.sim, m = sim.aircraftModel, g = m.group, T = THREE;
+        g.updateMatrixWorld(true);
+        var gh = sim.env.getGroundHeight(sim.fm.pos.x, sim.fm.pos.z);
+        // 逐顶点计算: 机身/发动机最低点 与 机轮最低点 相对地面的高度
+        function minVert(o) { var pa = o.geometry && o.geometry.attributes.position, v = new T.Vector3(), mn = 1e9;
+          if (!pa) return mn; for (var i = 0; i < pa.count; i++) { v.fromBufferAttribute(pa, i).applyMatrix4(o.matrixWorld); if (v.y < mn) mn = v.y; } return mn; }
+        var wheel = 1e9, body = 1e9;
+        g.traverse(function (o) {
+          if (!o.isMesh || !o.visible) return;
+          var p = o, inGear = false; while (p && p !== g) { if (/bogie|gear|wheel/i.test(p.name || '')) inGear = true; p = p.parent; }
+          var mv = minVert(o); if (inGear) wheel = Math.min(wheel, mv); else body = Math.min(body, mv);
+        });
+        var dz = wheel - gh, bz = body - gh;
+        var up = new T.Vector3(0, 1, 0).applyQuaternion(g.getWorldQuaternion(new T.Quaternion()));
+        var tex = 'n/a';
+        if (m.asset) { var f = m.parts.fuselage; tex = f && f.material && f.material.map && f.material.map.userData.ready ? 'ready' : 'pending'; }
+        if (m.asset && m.asset.texId && tex !== 'ready') throw new Error('贴图未就绪');   // 0.6.0: 无 texId 的机模 (A320neo/ceo, A330, C919, E190) 用模型自带材质, 不需要合成贴图
+        if (dz < -0.5 || dz > 0.3) throw new Error('机轮底部相对地面 ' + dz.toFixed(2) + ' m (悬空或下陷)');
+        var isE = sim.aircraftKey === 'E190' || /E190/.test(m.source || '');
+        if (bz < (isE ? 0.30 : 0.1)) throw new Error('机身/发动机最低点距地面仅 ' + bz.toFixed(2) + ' m');   // 0.6.1: E190 支柱加长后短舱离地 ≈0.38 m (APM 0.38 m), 阈值 0.30; 其他机型恢复 0.1
+        if (isE && Math.abs(dz) > 0.05) throw new Error('E190 机轮未压在跑道上 dz=' + dz.toFixed(3));
+        if (sim.fm.getState().onGround && Math.abs(sim.fm.getState().pitchDeg) < 3 && up.y < 0.99) throw new Error('模型姿态与机体轴不一致 up=' + up.y.toFixed(3));
+        if (!sim.cockpit3d || !sim.cockpit3d.clickables.length) throw new Error('三维驾驶舱未构建');
+        return m.source + ' / 驾驶舱 ' + sim.cockpit3d.L.maker + ', 机轮 ' + dz.toFixed(2) + ' m, 机身/发动机离地 ' + bz.toFixed(2) + ' m, 贴图 ' + tex + ', ' + sim.renderer.info.render.calls + ' draw calls';
+      });
+    });
+  }
+
+
+  /* ---------------- beta 0.3 ---------------- */
+  console.log('\n[4] beta 0.3: A321neo 起飞 / 视角与帮助 / 联网地景');
+  if (ONLY.indexOf('4') >= 0) {
+  await job('A321neo 起飞 (ZGGG, 内置地形)', 'aircraft=A321neo&scenario=takeoff&dep=ZGGG&autostart=1&online=0', async function (page) {
+    await started(page);
+    return await page.evaluate(function () {
+      var sim = FS.sim, fm = sim.fm, st0 = fm.getState();
+      if (Math.abs(st0.pitchDeg) > 1.5) throw new Error('静止俯仰角 ' + st0.pitchDeg.toFixed(2) + '° (坐尾?)');
+      sim.paused = true;
+      fm.setParkingBrake(false); fm.setThrottle('all', 1);
+      var vr = (fm.ac.perf && (fm.ac.perf.vr || fm.ac.perf.vrKt)) || 145, maxGroundPitch = 0, t = 0, air = false, st;
+      var h0 = st0.heading;   // 度
+      for (var i = 0; i < 120 * 90; i++) {
+        st = fm.getState();
+        var pin = st.iasKt > vr ? 0.55 : 0;
+        if (st.pitchDeg > 12) pin = 0;
+        var dh = ((h0 - st.heading + 540) % 360) - 180;          // 方向舵保持跑道航向
+        fm.setPilotInput(pin, 0, Math.max(-1, Math.min(1, dh * 0.25))); fm.update(1 / 120); t += 1 / 120;
+        if (st.onGround) maxGroundPitch = Math.max(maxGroundPitch, st.pitchDeg);
+        if (!st.onGround && st.altFt - st0.altFt > 200) { air = true; break; }
+      }
+      fm.setPilotInput(0, 0, 0); sim.paused = false;
+      if (!air) throw new Error('90 s 内未离地 (IAS ' + st.iasKt.toFixed(0) + ' kt, pitch ' + st.pitchDeg.toFixed(1) + '°)');
+      if (maxGroundPitch > 11.5) throw new Error('地面最大俯仰 ' + maxGroundPitch.toFixed(1) + '° (擦尾风险)');
+      return '静止俯仰 ' + st0.pitchDeg.toFixed(2) + '°, ' + t.toFixed(0) + ' s 后离地并爬升 200 ft, 地面最大俯仰 ' + maxGroundPitch.toFixed(1) + '°';
+    });
+  });
+
+  await job('视角按钮 / C 键 / ? 帮助', 'aircraft=A320neo&scenario=takeoff&autostart=1&online=0', async function (page) {
+    await started(page);
+    var m0 = await page.evaluate(function () { return FS.sim.cameraRig.mode; });
+    await page.click('#view-btn'); await sleep(900);
+    var m1 = await page.evaluate(function () { return FS.sim.cameraRig.mode; });
+    if (m1 === m0) throw new Error('视角按钮无效');
+    var label = await page.$eval('#view-name', function (e) { return e.textContent; });
+    await page.keyboard.press('KeyC'); await sleep(900);
+    var m2 = await page.evaluate(function () { return FS.sim.cameraRig.mode; });
+    if (m2 === m1) throw new Error('C 键无效');
+    var opts = await page.$$eval('#view-select option', function (o) { return o.length; });
+    await page.select('#view-select', 'cockpit'); await sleep(200);
+    var m3 = await page.evaluate(function () { return FS.sim.cameraRig.mode; });
+    if (m3 !== 'cockpit') throw new Error('下拉选择视角无效');
+    await page.keyboard.down('Shift'); await page.keyboard.press('Slash'); await page.keyboard.up('Shift'); await sleep(300);
+    var help = await page.$eval('#help-overlay', function (e) { return !e.classList.contains('hidden'); });
+    if (!help) throw new Error('? 键未打开帮助');
+    return m0 + ' → (按钮) ' + m1 + ' [' + label + '] → (C) ' + m2 + ' → (下拉) cockpit; 下拉 ' + opts + ' 项; ? 打开帮助';
+  });
+
+  await job('online=0: 不请求任何瓦片', 'aircraft=A320neo&scenario=takeoff&autostart=1&online=0', async function (page) {
+    await started(page); await sleep(4000);
+    var r = await page.evaluate(function () { return { s: !!FS.sim.scenery, b: FS.sim.env.isBuiltinTerrainVisible() }; });
+    if (page.__tileStats.req) throw new Error('仍发出 ' + page.__tileStats.req + ' 个瓦片请求');
+    if (!r.b) throw new Error('内置地形未显示');
+    return '0 个瓦片请求, 内置地形显示, scenery 对象 ' + (r.s ? '存在(禁用)' : '未创建');
+  });
+
+  await job('联网地景回退 (拦截全部瓦片请求)', 'aircraft=A320neo&scenario=takeoff&dep=VHHH&autostart=1&online=1', async function (page) {
+    await started(page);
+    await page.waitForFunction('FS.sim.scenery && FS.sim.scenery.status().failed', { timeout: 60000 });
+    var r = await page.evaluate(function () {
+      var st = FS.sim.scenery.status(), fm = FS.sim.fm, h = FS.sim.env.getGroundHeight(fm.pos.x, fm.pos.z);
+      return { st: st, b: FS.sim.env.isBuiltinTerrainVisible(), h: h, attrib: (document.getElementById('scenery-attrib') || {}).style };
+    });
+    if (!r.b) throw new Error('回退后内置地形未显示');
+    if (!isFinite(r.h)) throw new Error('地面高度 NaN');
+    return 'status failed (请求 ' + r.st.requests + ', 错误 ' + r.st.errors + '), 内置地形显示, 地面高度 ' + r.h.toFixed(1) + ' m, 无页面错误';
+  }, async function (page) {
+    page.__blockTiles = true;
+    await page.setRequestInterception(true);
+    page.on('request', function (r) { if (TILE_RE.test(r.url())) r.abort('internetdisconnected'); else r.continue(); });
+  });
+
+  if (process.env.ONLINE !== '0') {
+    await job('联网地景 真实瓦片 (VHHH 进近)', 'aircraft=A320neo&scenario=ils-approach&dep=VHHH&autostart=1&online=1', async function (page) {
+      await started(page);
+      await page.waitForFunction('FS.sim.scenery && (FS.sim.scenery.status().ready || FS.sim.scenery.status().failed)', { timeout: 120000 });
+      var r = await page.evaluate(function () {
+        var sim = FS.sim, st = sim.scenery.status(), fm = sim.fm;
+        var a = document.getElementById('scenery-attrib');
+        return { st: st, b: sim.env.isBuiltinTerrainVisible(), h: sim.env.getGroundHeight(fm.pos.x, fm.pos.z),
+          attr: a ? a.textContent : '', attrShown: a ? a.style.display !== 'none' : false, fps: sim.fps || 0 };
+      });
+      if (r.st.failed) throw new Error('联网地景失败: ' + r.st.lastErr);
+      if (r.b) throw new Error('就绪后内置地形仍显示');
+      if (!r.attrShown || !/EOX/.test(r.attr) || !/Terrain Tiles/.test(r.attr)) throw new Error('署名缺失');
+      if (!isFinite(r.h)) throw new Error('地面高度 NaN');
+      return 'ready; 瓦片 ' + r.st.tiles + ', 请求 ' + r.st.requests + ' (成功 ' + r.st.ok + ', 错误 ' + r.st.errors + '), 地面高度 ' + r.h.toFixed(0) +
+        ' m, 署名显示; 浏览器层面: 瓦片请求 ' + page.__tileStats.req + ', 取消 ' + page.__tileStats.failed + ', 4xx ' + page.__tileStats.http4xx;
+    });
+  }
+  }
+
+  /* ---------------- beta 0.3.1 ---------------- */
+  console.log('\n[5] beta 0.3.1: 三维驾驶舱 / 看仪表板 / 点击 FCU / 失速保护 (已取消简化仪表)');
+  if (ONLY.indexOf('5') >= 0) {
+  await job('A320neo 三维驾驶舱默认 + N 看仪表板 + 无六屏', 'aircraft=A320neo&scenario=takeoff&dep=ZGGG&autostart=1&online=0', async function (page) {
+    await started(page);
+    var r0 = await page.evaluate(function () {
+      var sim = FS.sim, c = sim.cockpit3d, d = document.getElementById('displays');
+      return { has: !!c, active: c && c.active, vis: c && c.group.visible, maker: c && c.L.maker, cam: sim.cameraRig.mode,
+        dispHidden: !d || d.classList.contains('hidden') || getComputedStyle(d).display === 'none',
+        simple: !!sim.simpleInstruments, noSimpleBtn: !document.getElementById('simple-btn'),
+        frames: c ? c.stats.displayFrames : 0, fov: sim.camera.fov,
+        ext: (function () { var n = 0; sim.aircraftModel.group.traverse(function (o) { if (o.isMesh && o.visible && !(function (x) { for (; x; x = x.parent) if (x === c.group) return true; return false; })(o)) n++; }); return n; })() };
+    });
+    if (!r0.has || !r0.active || !r0.vis) throw new Error('默认未进入三维驾驶舱 ' + JSON.stringify(r0));
+    if (r0.maker !== 'airbus') throw new Error('A320 布局应为 airbus');
+    if (!r0.dispHidden || r0.simple) throw new Error('六屏/简化仪表应已取消 ' + JSON.stringify(r0));
+    if (r0.ext > 0) throw new Error('驾驶舱内仍显示 ' + r0.ext + ' 个外部模型网格');
+    await sleep(1500);
+    var f1 = await page.evaluate(function () { return FS.sim.cockpit3d.stats.displayFrames; });
+    var hz = (f1 - r0.frames) / 1.5;
+    if (f1 <= r0.frames) throw new Error('仪表贴图未刷新');
+    await page.keyboard.press('KeyN');   // 0.6.0: 软件渲染 (swiftshader) 下帧率低, 改为最多等 6 s 直到视角/FOV 到位, 而不是固定 1.5 s
+    await page.waitForFunction(function () { return FS.sim.cameraRig.panelView && FS.sim.camera.fov <= 54; }, { timeout: 6000 }).catch(function () {});
+    var pv = await page.evaluate(function () { return { pv: FS.sim.cameraRig.panelView, fov: FS.sim.camera.fov, pitch: FS.sim.cameraRig.headPitch }; });
+    if (!pv.pv || pv.fov > 54) throw new Error('N 未切到仪表板视角 ' + JSON.stringify(pv));
+    await page.keyboard.press('KeyN');
+    await page.waitForFunction(function () { return !FS.sim.cameraRig.panelView; }, { timeout: 6000 }).catch(function () {});
+    var pv2 = await page.evaluate(function () { return FS.sim.cameraRig.panelView; });
+    if (pv2) throw new Error('再按 N 未恢复向外看');
+    // Tab: 侧边面板 (不应再打开六屏)
+    await page.keyboard.press('Tab'); await sleep(500);
+    var s1 = await page.evaluate(function () {
+      var d = document.getElementById('displays');
+      return { simple: !!FS.sim.simpleInstruments,
+        dispHidden: !d || d.classList.contains('hidden') || getComputedStyle(d).display === 'none',
+        act: FS.sim.cockpit3d.active };
+    });
+    if (s1.simple || !s1.dispHidden || !s1.act) throw new Error('Tab 不应打开六屏 ' + JSON.stringify(s1));
+    await page.select('#view-select', 'chase');   // 0.6.0: 软件渲染下低帧率, 等待最多 6 s 直到切换生效 (原固定 0.8 s)
+    await page.waitForFunction(function () { var sim = FS.sim, f = sim.aircraftModel.parts && sim.aircraftModel.parts.fuselage; return !sim.cockpit3d.active && !sim.cockpit3d.group.visible && (!f || f.visible); }, { timeout: 6000 }).catch(function () {});
+    var ex = await page.evaluate(function () { var sim = FS.sim; return { act: sim.cockpit3d.active, vis: sim.cockpit3d.group.visible, fus: sim.aircraftModel.parts && sim.aircraftModel.parts.fuselage ? sim.aircraftModel.parts.fuselage.visible : true }; });
+    if (ex.act || ex.vis || !ex.fus) throw new Error('切到外部视角后驾驶舱/机身显示异常 ' + JSON.stringify(ex));
+    return 'airbus 布局, 外部网格隐藏, 仪表贴图 ≈' + hz.toFixed(0) + ' Hz, FOV ' + r0.fov.toFixed(0) + '°; N → 仪表板 → 恢复; 无六屏; 外部视角恢复机身';
+  });
+
+  await job('三维 FCU 鼠标点击 AP1 + 油门杆 / 侧杆随输入', 'aircraft=A320neo&scenario=cruise&autostart=1&online=0', async function (page) {
+    await started(page);
+    await page.evaluate(function () { if (FS.sim.ap.ap.ap1 || FS.sim.ap.ap.ap2) FS.sim.ap.disengage('test'); });
+    await sleep(500);
+    var loc = await page.evaluate(function () {
+      var c = FS.sim.cockpit3d, l = c.locate(function (a) { return a.click === 'fcu-ap1'; }, FS.sim.camera);
+      return l && { x: (l.x + 1) / 2 * innerWidth, y: (1 - l.y) / 2 * innerHeight, nx: l.x, ny: l.y };
+    });
+    if (!loc || Math.abs(loc.nx) > 1 || Math.abs(loc.ny) > 1) throw new Error('AP1 按钮不在画面内 ' + JSON.stringify(loc));
+    var under = await page.evaluate(function (x, y) { var e = document.elementFromPoint(x, y); return e && (e.id || e.className); }, loc.x, loc.y);
+    await page.mouse.click(loc.x, loc.y); await sleep(600);
+    var ap = await page.evaluate(function () { return !!FS.sim.ap.ap.ap1; });
+    if (!ap) {
+      var why = await page.evaluate(function () { return JSON.stringify(FS.sim.fm.warnings) + ' ias ' + FS.sim.fm.getState().iasKt.toFixed(0); });
+      throw new Error('点击三维 FCU 的 AP1 未接通自动驾驶 (点击位置元素: ' + under + ', ' + why + ')');
+    }
+    var lv = await page.evaluate(function () {
+      var sim = FS.sim, c = sim.cockpit3d, fm = sim.fm;
+      sim.ap.disengage('test');
+      if (sim.ap.ap.athr && sim.ap.setAthr) sim.ap.setAthr(false);
+      sim.ap.ap.athr = false;
+      fm.setThrottle('all', 0); c.update(0.1, fm.getState(), null);
+      var a0 = c.thrLevers[0].rotation.x;
+      fm.setThrottle('all', 1); c.update(0.1, fm.getState(), null);
+      var a1 = c.thrLevers[0].rotation.x;
+      fm.pilot.pitch = 0.8; fm.pilot.roll = -0.6; c.update(0.1, fm.getState(), null);
+      var sx = c.sticks[0].g.rotation.x, sz = c.sticks[0].g.rotation.z;
+      return { d: Math.abs(a1 - a0) * 180 / Math.PI, sx: sx, sz: sz };
+    });
+    if (lv.d < 20) throw new Error('油门杆未随推力移动 (' + lv.d.toFixed(1) + '°)');
+    if (Math.abs(lv.sx) < 0.1 || Math.abs(lv.sz) < 0.1) throw new Error('侧杆未随输入偏转 ' + JSON.stringify(lv));
+    return 'AP1 在画面 (' + loc.x.toFixed(0) + ', ' + loc.y.toFixed(0) + ') 处点击后接通; 油门杆行程 ' + lv.d.toFixed(0) + '°; 侧杆偏转 ' + lv.sx.toFixed(2) + ' / ' + lv.sz.toFixed(2) + ' rad';
+  });
+
+  await job('0.4.2 三维驾驶舱可操作开关 (灯光 / APU / 主电门 / 停留刹车 / 自动刹车 / 襟翼 / 减速板 / 推力拖动 / FCU 旋钮)', 'aircraft=A320neo&scenario=cold-dark&dep=ZGGG&autostart=1&online=0', async function (page) {
+    await started(page);
+    var r = await page.evaluate(function () {
+      var sim = FS.sim, c = sim.cockpit3d, fm = sim.fm, out = [];
+      function ctl(id) { var e = c.ctlById[id]; if (!e) throw new Error('缺少控件 ' + id); return e.ctl; }
+      var need = ['gear', 'throttle1', 'throttle2', 'flap', 'speedbrake', 'apu', 'eng-master-1', 'eng-master-2', 'park-brake', 'autobrake',
+        'light-landing', 'light-taxi', 'light-strobe', 'light-beacon', 'light-nav', 'light-logo', 'light-wing', 'light-cabin', 'light-rwyTurnoff', 'sidestick-ap-disc-L',
+        'elec-bat1', 'elec-bat2', 'elec-ext', 'apu-start', 'apu-bleed', 'adirs-ir1', 'adirs-ir2', 'adirs-ir3', 'fuel-l1', 'fuel-r1', 'eng-mode', 'xpdr', 'tcas'];
+      need.forEach(ctl);
+      var l0 = !!sim.lights.landing; ctl('light-landing').click(1); if (!!sim.lights.landing === l0) throw new Error('着陆灯开关无效');
+      var pb0 = !!fm.parkingBrake; ctl('park-brake').click(1); if (!!fm.parkingBrake === pb0) throw new Error('停留刹车旋钮无效');
+      if (document.getElementById('park-brake').classList.contains('on') !== !!fm.parkingBrake) throw new Error('停留刹车侧边面板未同步');
+      // 冷舱: APU MASTER / ENG MASTER 只改变电门位置, 无电时不会起动 (完整流程见下一项)
+      ctl('apu').click(1); if (!fm.sys.sw.apuMaster) throw new Error('APU MASTER 按钮无效'); ctl('apu').click(1);
+      ctl('eng-master-1').click(1); if (!fm.sys.sw.engMaster[0]) throw new Error('发动机主电门 1 无效');
+      for (var k = 0; k < 120; k++) fm.update(1 / 60);
+      if (fm.engines[0].state !== 'off') throw new Error('冷舱无电时主电门 ON 不应起动发动机');
+      ctl('eng-master-1').click(1); if (fm.sys.sw.engMaster[0]) throw new Error('发动机主电门 1 无法关闭');
+      var ab0 = fm.autoBrake; ctl('autobrake').click(1); if (fm.autoBrake === ab0) throw new Error('自动刹车旋钮无效');
+      fm.setFlapDetent(0); ctl('flap').click(1); if (fm.flapDetentIndex !== 1) throw new Error('襟翼手柄放下无效');
+      ctl('flap').click(-1); if (fm.flapDetentIndex !== 0) throw new Error('襟翼手柄右键收上无效');
+      ctl('speedbrake').wheel(-1); if (!(fm.spoilerCmd > 0.4 && fm.spoilerCmd < 0.6)) throw new Error('减速板滚轮半程无效 ' + fm.spoilerCmd);
+      var arm0 = !!fm.spoilerArmedLanding; ctl('speedbrake').click(-1); if (!!fm.spoilerArmedLanding === arm0) throw new Error('地面扰流板预位无效');
+      sim.ap.ap.athr = false; fm.setThrottle('all', 0); sim.input.setThrottle(0);
+      var t = ctl('throttle1'); t.drag.begin(); t.drag.move(0.16);
+      if (Math.abs(fm.throttle[0] - 0.5) > 0.05 || Math.abs(fm.throttle[1] - fm.throttle[0]) > 1e-6) throw new Error('推力手柄拖动无效 ' + fm.throttle);
+      var f = sim.hud._fcu, h0 = f.hdg, a0 = f.alt;
+      sim.hud._knobAdjust('fcu-hdg-inc', 1); sim.hud._knobAdjust('fcu-alt-inc', 1);
+      if (f.hdg === h0 || f.alt === a0) throw new Error('FCU 旋钮不起作用 (fcu-*-inc)');
+      var fd0 = !!sim.ap.ap.fd1; c.perform({ act: { click: 'efis-fd' } }); if (!!sim.ap.ap.fd1 === fd0) throw new Error('EFIS FD 按钮无效');
+      // 动画: 主电门拨杆随发动机状态转动
+      for (var i = 0; i < 30; i++) c.update(0.05, fm.getState(), null);
+      return c.listControls();
+    });
+    // 真实鼠标: 抬头点击头顶板 STROBE 开关
+    var f0 = await page.evaluate(function () { var r = FS.sim.cameraRig; r.panelView = false; r.headYaw = r.headYawTarget = 0; r.headPitch = r.headPitchTarget = 0.75; return FS.sim.renderer.info.render.frame; });
+    await page.waitForFunction(function (f0) { return FS.sim.renderer.info.render.frame >= f0 + 3; }, { timeout: 30000 }, f0);
+    var loc = await page.evaluate(function () { var l = FS.sim.cockpit3d.locateCtl('light-strobe', FS.sim.camera); return { x: (l.x + 1) / 2 * innerWidth, y: (1 - l.y) / 2 * innerHeight, s0: !!FS.sim.lights.strobe }; });
+    await page.mouse.click(loc.x, loc.y); await sleep(500);
+    var s1 = await page.evaluate(function () { return !!FS.sim.lights.strobe; });
+    if (s1 === loc.s0) throw new Error('鼠标点击头顶板 STROBE 开关无效 (' + loc.x.toFixed(0) + ', ' + loc.y.toFixed(0) + ')');
+    return r.meshControls.length + ' 个三维控件 + ' + r.canvasHotspots + ' 个 FCU/EFIS 热区; 全部动作有效; 鼠标点击 STROBE (' + loc.x.toFixed(0) + ', ' + loc.y.toFixed(0) + ') 生效';
+  });
+
+  // beta 0.4.2: 冷舱启动 —— 只用鼠标点击三维驾驶舱热区, 从全黑走到双发运转 (空客 / 波音两套面板)
+  var COLD_SHOTS = process.env.COLD_SHOTS || '';
+  ['A320neo', 'B737-800'].forEach(function (type) { coldJobs.push(type); });
+  for (var cj = 0; cj < coldJobs.length; cj++) await (function (type) {
+    return job('冷舱启动 ' + type + ': 仅鼠标点击三维开关 → 双发运转 + 检查单完成', 'aircraft=' + type + '&scenario=cold-dark&dep=ZGGG&autostart=1&online=0', async function (page) {
+      await started(page);
+      var info = await page.evaluate(function () {
+        var sim = FS.sim, fm = sim.fm, y = fm.sys;
+        if (!y || !y.strict) throw new Error('冷舱场景未进入严格模式');
+        if (y.out.dc || fm.engines.some(function (e) { return e.state !== 'off'; })) throw new Error('冷舱开局应全黑且发动机关闭');
+        sim.cameraRig.panelView = false;
+        return { boeing: y.boeing, maker: sim.cockpit3d.L.maker, nIr: y.nIr };
+      });
+      if ((info.maker === 'boeing') !== info.boeing) throw new Error('驾驶舱布局与系统机型不一致 ' + JSON.stringify(info));
+      var clicks = 0, log = [];
+      async function aimClick(id, button) {
+        var f0 = await page.evaluate(function (id) {
+          var sim = FS.sim, c = sim.cockpit3d, T = c.THREE, r = sim.cameraRig, e = c.ctlById[id];
+          if (!e) throw new Error('缺少控件 ' + id);
+          c.group.updateMatrixWorld(true);
+          var p = new T.Vector3().setFromMatrixPosition(e.mesh.matrixWorld), ep = new T.Vector3(), eq = new T.Quaternion();
+          c.eyeL.getWorldPosition(ep); c.eyeL.getWorldQuaternion(eq);
+          var d = p.sub(ep).applyQuaternion(eq.invert()).normalize();
+          r.headYaw = r.headYawTarget = Math.atan2(-d.x, -d.z);
+          r.headPitch = r.headPitchTarget = Math.atan2(d.y, Math.hypot(d.x, d.z));
+          return sim.renderer.info.render.frame;
+        }, id);
+        await page.waitForFunction(function (f0) { return FS.sim.renderer.info.render.frame >= f0 + 3; }, { timeout: 30000 }, f0);
+        var loc = await page.evaluate(function (id) {
+          var sim = FS.sim, c = sim.cockpit3d, l = c.locateCtl(id, sim.camera), h = c.pick(l.x, l.y, sim.camera);
+          return { x: (l.x + 1) / 2 * innerWidth, y: (1 - l.y) / 2 * innerHeight, same: !!(h && h.ctl === c.ctlById[id].ctl) };
+        }, id);
+        if (!loc.same) throw new Error('热区 ' + id + ' 被遮挡或重叠 (' + loc.x.toFixed(0) + ', ' + loc.y.toFixed(0) + ')');
+        await page.mouse.click(loc.x, loc.y, { button: button || 'left' }); clicks++;
+        await sleep(120);
+      }
+      // 点击直到条件满足 (旋钮可能需要多次)
+      async function step(id, cond, button, max) {
+        for (var n = 0; n < (max || 4); n++) {
+          if (await page.evaluate(cond)) { log.push(id); return; }
+          await aimClick(id, button);
+        }
+        if (!(await page.evaluate(cond))) {
+          var st = await page.evaluate(function () { return JSON.stringify(FS.sim.fm.sys.sw); });
+          throw new Error('点击 ' + id + ' 后状态未达到: ' + cond + ' | sw=' + st);
+        }
+        log.push(id);
+      }
+      async function ff(sec) {
+        await page.evaluate(function (sec) {
+          var sim = FS.sim; sim.paused = true;
+          for (var i = 0; i < sec * 120; i++) sim.fm.update(1 / 120);
+          sim.paused = false;
+        }, sec);
+        await sleep(300);
+      }
+      var S = 'FS.sim.fm.sys.sw', O = 'FS.sim.fm.sys.out';
+      await step('elec-bat1', S + '.bat1'); await step('elec-bat2', S + '.bat2');
+      await step('elec-ext', S + '.extPwr && ' + O + '.ac');
+      for (var i = 0; i < info.nIr; i++) await step('adirs-ir' + (i + 1), S + ".ir[" + i + "] === 'NAV'", 'left', 4);
+      var pumps = ['fuel-l1', 'fuel-l2', 'fuel-c1', 'fuel-c2', 'fuel-r1', 'fuel-r2'];
+      for (var q = 0; q < pumps.length; q++) await step(pumps[q], S + '.pumps[' + q + ']');
+      await step('light-nav', 'FS.sim.lights.nav'); await step('light-beacon', 'FS.sim.lights.beacon');
+      await step('sign-seatbelts', S + '.seatBelts');
+      await step('apu', S + '.apuMaster');
+      await step('apu-start', "FS.sim.fm.sys.apu.state !== 'off'", 'left', 1);
+      await ff(35);
+      if (!(await page.evaluate('FS.sim.fm.apuAvail'))) throw new Error('APU 35 s 后仍未 AVAIL');
+      await step('apu-bleed', S + '.apuBleed && ' + O + '.duct[1]');
+      if (info.boeing) await step('eng-start-sel-2', S + ".engStart[1] === 'GRD'", 'right', 2);
+      else await step('eng-mode', S + ".engMode === 'IGN'", 'left', 2);
+      await step('eng-master-2', S + '.engMaster[1]');
+      await ff(3);
+      if (!(await page.evaluate("FS.sim.fm.engines[1].state !== 'off'"))) throw new Error('ENG 2 未起动: ' + (await page.evaluate('FS.sim.fm.sys.block[1]')));
+      await ff(60);
+      if (info.boeing) await step('eng-start-sel-1', S + ".engStart[0] === 'GRD'", 'right', 2);
+      await step('eng-master-1', S + '.engMaster[0]');
+      await ff(60);
+      if (!info.boeing) await step('eng-mode', S + ".engMode === 'NORM'", 'right', 2);
+      await ff(20);
+      var res = await page.evaluate(function () {
+        var sim = FS.sim, fm = sim.fm, st = fm.getState(); st.lights = sim.lights;
+        var cl = new FS.ChecklistManager(), out = {};
+        ['beforeStart', 'afterStart'].forEach(function (ph) {
+          cl.setPhase(ph); out[ph] = cl.status(st).items.filter(function (x) { return !x.done; }).map(function (x) { return x.key; });
+        });
+        return { eng: fm.engines.map(function (e) { return e.state + ' ' + e.n1.toFixed(1); }), irNav: fm.sys.out.irAllNav, apAvail: fm.sys.out.apAvail,
+          disp: fm.sys.out.disp, open: out,
+          obj: (sim.scenarioMgr.objectives || []).map(function (o) { return (o.done ? '✓' : '·') + (o.text || o.id || ''); }) };
+      });
+      if (!res.eng.every(function (e) { return /^running/.test(e); })) throw new Error('双发未运转 ' + res.eng);
+      if (!res.irNav || !res.apAvail || !res.disp.pfd || !res.disp.nd) throw new Error('IR / 显示 / AP 不可用 ' + JSON.stringify(res));
+      var okBefore = ['autobrake', 'flaps', 'takeoffBriefing', 'parkBrakeOff', 'xpdr', 'tcas', 'strobe', 'landingLight', 'doors'];
+      var missing = res.open.beforeStart.filter(function (k) { return okBefore.indexOf(k) < 0; });
+      if (missing.length) throw new Error('起动前检查单未完成: ' + missing.join(','));
+      var objDone = res.obj.filter(function (o) { return o[0] === '✓'; }).length;
+      if (COLD_SHOTS) {
+        var tag = type.replace(/[^A-Za-z0-9]/g, '');
+        await page.evaluate(function () { var r = FS.sim.cameraRig; r.headYaw = r.headYawTarget = 0; r.headPitch = r.headPitchTarget = 0.85; });
+        await sleep(1200); await page.screenshot({ path: COLD_SHOTS + '/' + tag + '-overhead.png' });
+        await aimClick(info.boeing ? 'eng-master-1' : 'eng-mode', 'middle'); await sleep(1200);
+        await page.screenshot({ path: COLD_SHOTS + '/' + tag + '-pedestal.png' });
+        await page.evaluate(function () { var r = FS.sim.cameraRig; r.headYaw = r.headYawTarget = 0; r.headPitch = r.headPitchTarget = 0; });
+        await sleep(1200); await page.screenshot({ path: COLD_SHOTS + '/' + tag + '-panel.png' });
+      }
+      return clicks + ' 次鼠标点击 (' + log.length + ' 步); 发动机 ' + res.eng.join(' / ') + '; 场景目标 ' + objDone + '/' + res.obj.length +
+        '; 起动后检查单未完成: ' + (res.open.afterStart.join(',') || '无');
+    });
+  })(coldJobs[cj]);
+
+  await job('B737-800 驾驶盘 + 抖杆失速保护', 'aircraft=B737-800&scenario=cruise&autostart=1&online=0', async function (page) {
+    await started(page);
+    return await page.evaluate(function () {
+      var sim = FS.sim, c = sim.cockpit3d, fm = sim.fm;
+      if (!c || c.L.maker !== 'boeing' || !c.yokes.length || c.sticks.length) throw new Error('737 应为波音驾驶盘布局');
+      if (!c.active) throw new Error('三维驾驶舱未激活');
+      sim.ap.disengage('test'); fm.apCmd.active = false;   // 暂停时自动驾驶不再更新, 手动清除其舵面指令
+      var y0 = c.yokes[0].col.rotation.x;
+      fm.pilot.pitch = 0.9; for (var i = 0; i < 20; i++) c.update(0.05, fm.getState(), null);
+      var y1 = c.yokes[0].col.rotation.x;
+      if (Math.abs(y1 - y0) < 0.08) throw new Error('驾驶盘未随俯仰输入移动');
+      // 失速保护: 收油门并持续拉杆 (下降到 15000 ft 附近再测, 与单元测试一致)
+      sim.paused = true; fm.apCmd.active = false;
+      fm.setThrottle('all', 0);
+      var maxA = -1e9, shaker = false, stall = 1e9;
+      for (var j = 0; j < 120 * 60; j++) {
+        fm.setPilotInput(1, 0, 0); fm.update(1 / 120);
+        var st = fm.getState();
+        if (st.stickShaker) shaker = true;
+        if (!isFinite(st.alphaDeg) || !isFinite(st.altFt)) throw new Error('NaN');
+        maxA = Math.max(maxA, st.alphaDeg); stall = Math.min(stall, st.stallAngleDeg);
+      }
+      fm.setPilotInput(0, 0, 0); sim.paused = false;
+      if (!shaker) throw new Error('未触发抖杆');
+      if (maxA >= stall) throw new Error('迎角超过失速迎角 ' + maxA.toFixed(1) + '°');
+      return '驾驶盘俯仰 ' + ((y1 - y0) * 180 / Math.PI).toFixed(1) + '°; 持续满拉杆 60 s: 抖杆触发, 最大迎角 ' + maxA.toFixed(1) + '° < 失速 ' + stall.toFixed(1) + '°';
+    });
+  });
+
+  /* ===== SkyRoute Pro Beta 0.1 ===== */
+  await job('Pro: 故障模拟 + ECAM/EICAS 警告', 'aircraft=A320neo&scenario=cruise&autostart=1&online=0', async function (page) {
+    await started(page);
+    return await page.evaluate(function () {
+      var sim = FS.sim, fm = sim.fm, F = FS.ProFailures, out = [];
+      sim.paused = true; var PY0 = fm.pos.y;
+      function run(s) { for (var i = 0; i < s * 120; i++) fm.update(1 / 120); }
+      function memo() { fm.sys._buildMemo && (fm.sys.out.memo = fm.sys._buildMemo()); return (fm.sys.out.memo || []).map(function (m) { return m.t + '|' + m.c; }).join(';'); }
+      F.set('eng1', true); run(20);
+      if (fm.engines[0].state === 'running' || fm.engines[0].state === 'idle') throw new Error('ENG 1 未停车');
+      if (memo().indexOf('ENG 1 FAIL|amber') < 0) throw new Error('无 ENG 1 FAIL');
+      out.push('ENG1 ' + fm.engines[0].state); F.set('eng1', false);
+      F.set('fire2', true); run(1);
+      if (!fm.engines[1].fireWarning || !fm.warnings.masterWarning || memo().indexOf('ENG 2 FIRE|red') < 0) throw new Error('火警未告警');
+      fm.shutdownEngine(1); run(15); F.discharge(1); run(1);
+      if (F.active.fire2 || fm.engines[1].fireWarning) throw new Error('灭火后火警未消失'); out.push('FIRE 灭火 OK');
+      F.set('hyd0', true); F.set('hyd2', true); run(1);
+      if (fm.sys.out.gearHyd || fm.sys.out.flapHyd) throw new Error('液压失效未影响起落架/襟翼'); out.push('HYD G+Y → 起落架/襟翼不动');
+      F.set('hyd0', false); F.set('hyd2', false);
+      var a0 = fm.getState().iasKt; F.set('ias', true); fm.pos.y += 600; var a1 = fm.getState().iasKt; fm.pos.y -= 600;
+      if (Math.abs(a1 - a0) < 10) throw new Error('空速不可靠无效'); out.push('IAS 漂移 ' + (a1 - a0).toFixed(0) + ' kt'); F.set('ias', false);
+      var f0 = fm.fuelKg; F.set('leak', true); run(10); if (f0 - fm.fuelKg < 12) throw new Error('漏油无效'); F.set('leak', false);
+      F.set('press', true); var py0 = PY0; for (var k = 0; k < 150 * 120; k++) { fm.update(1 / 120); fm.pos.y = py0; } /* 无 AP 时自由飞会掉高度, 固定高度只测座舱增压模型 */ if (F.cabinAltFt < 10000 || memo().indexOf('CAB PR EXCESS CAB ALT|red') < 0) throw new Error('失压无效 ' + F.cabinAltFt);
+      out.push('CAB ALT ' + Math.round(F.cabinAltFt) + ' ft'); F.set('press', false);
+      F.set('ap', true); if (sim.ap.engage('ap1') !== false) throw new Error('AP 故障仍可接通'); F.set('ap', false);
+      F.set('gear', true); var g = fm.gearPos; fm.setGear(g < 0.5); run(5); if (fm.gearPos !== g) throw new Error('起落架卡滞无效'); F.set('gear', false);
+      F.clearAll(); sim.paused = false;
+      return out.join('; ');
+    });
+  });
+  await job('Pro: 多机位回放 + 天气/METAR + 航司涂装 + GPL 说明', 'aircraft=B787-9&scenario=takeoff&autostart=1&online=0', async function (page) {
+    await started(page);
+    return await page.evaluate(function () {
+      var sim = FS.sim, fm = sim.fm, R = FS.ProReplay, out = [];
+      sim.paused = true; fm.setThrottle('all', 1); fm.setParkingBrake && fm.setParkingBrake(false); fm.parkingBrake = false;
+      for (var i = 0; i < 120 * 25; i++) fm.update(1 / 120);
+      var x1 = fm.pos.x, z1 = fm.pos.z;
+      if (R.duration() < 20) throw new Error('回放记录不足 ' + R.duration());
+      if (!R.start()) throw new Error('无法开始回放');
+      R.seek(0); fm.update(1 / 120);
+      var moved = Math.hypot(fm.pos.x - x1, fm.pos.z - z1);
+      ['cockpit', 'chase', 'tower', 'free'].forEach(function (m) { sim.cameraRig.setMode(m); });
+      R.stop();
+      if (moved < 30) throw new Error('回放未回到起点 ' + moved);
+      if (Math.hypot(fm.pos.x - x1, fm.pos.z - z1) > 0.01) throw new Error('退出回放后未恢复状态');
+      out.push('回放 ' + R.duration().toFixed(0) + ' s, 回到起点 ' + moved.toFixed(0) + ' m, 退出后恢复');
+      var w = FS.ProWeather.parseMetar('ZSPD 271200Z 18012G25KT 3000 -RA BR BKN008 OVC020 18/16 Q1008');
+      if (w.windSpeedKt !== 12 || w.gustKt !== 25 || w.visibilityM !== 3000 || w.cloudBaseFt !== 800 || !(w.rain > 0) || w.qnhHpa !== 1008) throw new Error('METAR 解析错误 ' + JSON.stringify(w));
+      FS.ProWeather.apply(w); var g = sim.env.getWeather(); if (g.visibilityM !== 3000 || g.gustKt !== 25) throw new Error('天气未应用');
+      out.push('METAR OK');
+      var al = FS.LIVERIES.filter(function (l) { return l.airline; }).length;
+      if (al < 15 || !FS.LIVERY_NOTE) throw new Error('航司涂装缺失');
+      if (!document.querySelector('.pro-gpl') || !/GPL/.test(document.querySelector('.pro-gpl').textContent)) throw new Error('关于页缺少 GPL 说明');
+      localStorage.setItem('zz-test', '1'); var raw = Object.keys(localStorage).indexOf('srpro:zz-test') >= 0; localStorage.removeItem('zz-test');
+      if (!raw) throw new Error('存档未加 srpro: 前缀');
+      sim.paused = false;
+      return out.join('; ') + '; 航司涂装 ' + al + ' 套; GPL/致谢 OK; 独立存档 OK';
+    });
+  });
+  if (/^http/.test(BASE)) await job('Pro: FlightGear 驾驶舱 (A320 / 737 / 777 / 787)', 'aircraft=A320neo&scenario=takeoff&autostart=1&online=0', async function (page) {
+    await started(page);
+    var r = [];
+    for (var t of ['A320neo', 'B737-800', 'B777-300ER', 'B787-9']) {
+      if (t !== 'A320neo') { await page.goto(BASE + (BASE.indexOf('?') < 0 ? '?' : '&') + 'aircraft=' + t + '&scenario=takeoff&autostart=1&online=0'); await started(page); }
+      var x = await page.evaluate(async function () { var c = FS.sim.cockpit3d; var ok = c && c.fgReady ? await c.fgReady : false; return { ok: ok, tris: c.fg && c.fg.tris, hits: c.fgHitsAligned }; });
+      if (!x.ok || !x.tris) throw new Error(t + ' FG 驾驶舱未加载');
+      r.push(t + ' ' + Math.round(x.tris / 1000) + 'k tri, ' + x.hits + ' 点击区对齐');
+    }
+    return r.join('; ');
+  });
+  }
+
+  var pass = results.filter(function (r) { return r.ok; }).length;
+  console.log('\n结果: ' + pass + ' / ' + results.length + ' 通过');
+  await browser.close();
+  process.exitCode = pass === results.length ? 0 : 1;
+})();
