@@ -4,7 +4,7 @@
 
 > **SkyRoute Pro** 是 [天际航线 SkyRoute](https://github.com/kevinyuzekai/Flight-Simulator) 的独立 Pro 版本，在免费版基础上加入故障模拟、真实天气、多机位回放、航司涂装和来自 FlightGear 的 GPL 三维驾驶舱。Pro 版以 **GPL-2.0-or-later** 开源，存档与免费版分开（`srpro:` 前缀），两者可以同时安装。
 
-**当前版本：Pro beta 0.1（0.1.0）**——**尚未发布**。安装包将于 **2026-11-11 00:00（北京时间）** 发布在本仓库的 [Releases](https://github.com/kevinyuzekai/SkyRoute-Pro/releases) 页面，届时再提供下载。在此之前可以按下文「从源码运行」直接游玩。
+**当前版本：Pro beta 0.1（0.1.0）**——**尚未发布**。安装包将于 **2026-11-11 00:00（北京时间）** 发布在本仓库的 [Releases](https://github.com/kevinyuzekai/SkyRoute-Pro/releases) 页面，届时再提供下载。
 
 ---
 
@@ -12,8 +12,6 @@
 
 - [Pro beta 0.1 功能](#pro-beta-01-功能)
 - [下载](#下载)
-- [从源码运行](#从源码运行)
-- [测试](#测试)
 - [已知限制](#已知限制)
 - [许可与署名](#许可与署名)
 
@@ -37,25 +35,6 @@ Pro beta 0.1 将于 **2026-11-11 00:00（北京时间）** 发布到 [Releases](
 - 完整对应源码 `SkyRoutePro-0.1.0-source.zip`（含 Windows 桌面外壳与驾驶舱转换脚本）
 
 发布前 Releases 页面为空，属正常现象。
-
-## 从源码运行
-
-本仓库是 Pro 版的网页游戏源码，**无需构建**，纯 ES5 脚本，three.js 已内置在 `vendor/`。
-
-1. 克隆仓库：`git clone https://github.com/kevinyuzekai/SkyRoute-Pro.git`
-2. 用 Chrome / Edge 打开 `index.html`；或者在仓库目录启动一个本地静态服务器（例如 `python3 -m http.server 8000`），再访问 `http://localhost:8000/`。
-3. 主菜单中依次选择机型、场景、飞行设置，点 **开始飞行**；进游戏后按 **`?`** 或 **`F1`** 打开完整操作说明。
-
-> 推荐 Chrome 或 Edge。真实 METAR 和联网地景需要联网，其余功能可离线使用。
-
-## 测试
-
-```bash
-node tests/run-tests.js                       # 单元测试（Node.js ≥ 14，无第三方依赖）
-CHROME=/path/to/chrome node tests/e2e.js [baseUrl]   # 端到端测试
-```
-
-Pro beta 0.1 打包前的结果：单元测试 94/94、设备库测试通过、端到端 36/36（无头 Chrome）。
 
 ## 已知限制
 
